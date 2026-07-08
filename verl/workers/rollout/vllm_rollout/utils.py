@@ -62,7 +62,13 @@ def get_device_uuid(device_id: int) -> str:
         else:
             return f"NPU-{device_id}"
     else:
-        return current_platform.get_device_uuid(device_id)
+        try:
+            return current_platform.get_device_uuid(device_id)
+        except NotImplementedError:
+            # ROCm/AMD platform does not implement get_device_uuid.
+            # device_uuid is not used for ZMQ handle construction (which uses
+            # replica_rank + local_rank + job_id), so a fallback is safe.
+            return f"gpu-{device_id}"
 
 
 def get_vllm_max_lora_rank(lora_rank: int):
