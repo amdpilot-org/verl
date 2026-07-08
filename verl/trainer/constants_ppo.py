@@ -14,6 +14,7 @@
 
 import json
 import os
+import sys
 
 from ray._private.runtime_env.constants import RAY_JOB_CONFIG_JSON_ENV_VAR
 
@@ -56,9 +57,36 @@ def get_ppo_ray_runtime_env():
 
     runtime_env = {
         "env_vars": PPO_RAY_RUNTIME_ENV["env_vars"].copy(),
-        **({"working_dir": None} if working_dir is None else {}),
     }
+    # Only propagate working_dir when running inside an existing Ray job.
+    # Omitting the key (instead of setting it to None) lets Ray's runtime_env
+    # hook default it to the cwd; an explicit None crashes Ray >=2.5x's
+    # uv_runtime_env_hook with TypeError: path_or_uri must be a string.
+    if working_dir is not None:
+        runtime_env["working_dir"] = working_dir
     for key in list(runtime_env["env_vars"].keys()):
         if os.environ.get(key) is not None:
             runtime_env["env_vars"].pop(key, None)
+
+    # When the driver is launched via `uv run` but the active interpreter
+    # (sys.executable) is a system Python with the heavy deps (torch/vllm)
+    # installed — common in ROCm containers where those live in the system
+    # Python, not the uv-managed one — Ray's uv_runtime_env_hook would force
+    # workers into the uv Python which lacks those deps (and may even be a
+    # different major version, e.g. 3.14, breaking build-time deps like
+    # pyext). Disable the hook and pin workers to the driver's interpreter so
+    # they reuse the same working environment. An explicit user override via
+    # RAY_ENABLE_UV_RUN_RUNTIME_ENV is always respected.
+    if os.environ.get("RAY_ENABLE_UV_RUN_RUNTIME_ENV") is None:
+        try:
+            from ray._private.runtime_env.uv_runtime_env_hook import _get_uv_run_cmdline
+
+            if _get_uv_run_cmdline() is not None:
+                import ray._private.ray_constants as _ray_constants
+
+                _ray_constants.RAY_ENABLE_UV_RUN_RUNTIME_ENV = False
+                runtime_env["py_executable"] = sys.executable
+        except Exception:
+            pass
+
     return runtime_env

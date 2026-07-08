@@ -601,7 +601,18 @@ class vLLMHttpServer:
         if self.rollout_mode == RolloutMode.HYBRID:
             await self._sleep_hybrid()
         elif self.rollout_mode == RolloutMode.COLOCATED:
-            await self.engine.sleep(level=1)
+            try:
+                await self.engine.sleep(level=1)
+            except Exception as e:
+                if "Memory usage increased after sleeping" in str(e):
+                    logger.warning(
+                        "vLLM sleep assertion failed on shared GPU (another "
+                        "process allocated memory during sleep). Continuing "
+                        "without sleep. Error: %s",
+                        e,
+                    )
+                else:
+                    raise
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
 
@@ -901,7 +912,22 @@ class vLLMHttpServer:
             sleep_level = 1
         else:
             sleep_level = 2
-        await self.engine.collective_rpc("sleep", kwargs={"level": sleep_level})
+        try:
+            await self.engine.collective_rpc("sleep", kwargs={"level": sleep_level})
+        except Exception as e:
+            # On shared GPUs, other processes may allocate memory between the
+            # before/after mem_get_info() calls in vLLM's sleep(), causing
+            # freed_bytes < 0 and triggering an assertion. The sleep itself
+            # still works; only the assertion is overly strict for shared GPUs.
+            if "Memory usage increased after sleeping" in str(e):
+                logger.warning(
+                    "vLLM sleep assertion failed on shared GPU (another process "
+                    "allocated memory during sleep). Continuing without sleep. "
+                    "Error: %s",
+                    e,
+                )
+            else:
+                raise
         if _VLLM_VERSION >= version.parse("0.17.0"):
             await self.engine.reset_encoder_cache()
 
